@@ -492,6 +492,7 @@ async def menu_alerts(call: types.CallbackQuery):
     """Меню алертов"""
     user_id = call.from_user.id
     
+    # ПРОВЕРКА ОПЛАТЫ
     if not await is_paid(user_id):
         await call.answer("Оплатите доступ для использования алертов!", show_alert=True)
         return
