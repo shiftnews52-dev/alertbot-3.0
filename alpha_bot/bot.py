@@ -57,6 +57,7 @@ IMG_START = os.getenv("IMG_START", "")
 IMG_ALERTS = os.getenv("IMG_ALERTS", "")
 IMG_REF = os.getenv("IMG_REF", "")
 IMG_PAYWALL = os.getenv("IMG_PAYWALL", "")
+IMG_GUIDE = os.getenv("IMG_GUIDE", "")  # для инструкции
 
 logging.basicConfig(
     level=logging.INFO,
@@ -105,6 +106,7 @@ CREATE TABLE IF NOT EXISTS users (
     invited_by INTEGER,
     balance REAL DEFAULT 0,
     paid INTEGER DEFAULT 0,
+    language TEXT DEFAULT 'ru',
     created_ts INTEGER NOT NULL
 );
 
@@ -262,6 +264,102 @@ def rsi(closes: List[float], period: int = 14) -> Optional[float]:
         return 100.0
     return 100 - (100 / (1 + avg_gain / avg_loss))
 
+def sma(values: List[float], period: int) -> Optional[float]:
+    """Простая скользящая средняя"""
+    if len(values) < period:
+        return None
+    return sum(values[-period:]) / period
+
+def macd(closes: List[float]) -> Optional[Tuple[float, float, float]]:
+    """MACD индикатор - возвращает (macd_line, signal_line, histogram)"""
+    if len(closes) < MACD_SLOW + MACD_SIGNAL:
+        return None
+    
+    ema_fast = ema(closes, MACD_FAST)
+    ema_slow = ema(closes, MACD_SLOW)
+    
+    if ema_fast is None or ema_slow is None:
+        return None
+    
+    macd_line = ema_fast - ema_slow
+    
+    # Вычисляем историю MACD для signal line
+    macd_history = []
+    for i in range(len(closes) - MACD_SLOW - MACD_SIGNAL, len(closes)):
+        if i < MACD_FAST:
+            continue
+        ef = ema(closes[:i+1], MACD_FAST)
+        es = ema(closes[:i+1], MACD_SLOW)
+        if ef and es:
+            macd_history.append(ef - es)
+    
+    if len(macd_history) < MACD_SIGNAL:
+        return None
+    
+    signal_line = ema(macd_history, MACD_SIGNAL)
+    if signal_line is None:
+        return None
+    
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+def bollinger_bands(closes: List[float]) -> Optional[Tuple[float, float, float]]:
+    """Bollinger Bands - возвращает (upper, middle, lower)"""
+    if len(closes) < BB_PERIOD:
+        return None
+    
+    middle = sma(closes, BB_PERIOD)
+    if middle is None:
+        return None
+    
+    recent = closes[-BB_PERIOD:]
+    variance = sum((x - middle) ** 2 for x in recent) / BB_PERIOD
+    std = variance ** 0.5
+    
+    upper = middle + (std * BB_STD)
+    lower = middle - (std * BB_STD)
+    
+    return upper, middle, lower
+
+def volume_strength(candles: List[dict], period=20) -> Optional[float]:
+    """Сила объёма - относительно средней"""
+    if len(candles) < period + 1:
+        return None
+    
+    volumes = [c.get("v", 0) for c in candles[-period-1:]]
+    avg_volume = sum(volumes[:-1]) / period
+    current_volume = volumes[-1]
+    
+    if avg_volume == 0:
+        return 1.0
+    
+    return current_volume / avg_volume
+
+def check_divergence(closes: List[float], rsi_values: List[float]) -> Optional[str]:
+    """Проверка дивергенции между ценой и RSI"""
+    if len(closes) < 20 or len(rsi_values) < 20:
+        return None
+    
+    # Берём последние 20 свечей
+    price_recent = closes[-20:]
+    rsi_recent = rsi_values[-20:]
+    
+    # Бычья дивергенция: цена падает, RSI растёт
+    if price_recent[-1] < price_recent[0] and rsi_recent[-1] > rsi_recent[0]:
+        price_change = (price_recent[-1] - price_recent[0]) / price_recent[0]
+        rsi_change = rsi_recent[-1] - rsi_recent[0]
+        if price_change < -0.02 and rsi_change > 5:  # значимая дивергенция
+            return "bullish"
+    
+    # Медвежья дивергенция: цена растёт, RSI падает
+    if price_recent[-1] > price_recent[0] and rsi_recent[-1] < rsi_recent[0]:
+        price_change = (price_recent[-1] - price_recent[0]) / price_recent[0]
+        rsi_change = rsi_recent[-1] - rsi_recent[0]
+        if price_change > 0.02 and rsi_change < -5:
+            return "bearish"
+    
+    return None
+
 def atr(candles: List[dict], period=14) -> Optional[float]:
     if len(candles) < period + 1:
         return None
@@ -273,73 +371,233 @@ def atr(candles: List[dict], period=14) -> Optional[float]:
     return sum(true_ranges) / period
 
 def calculate_tp_sl(entry: float, side: str, atr_val: float) -> Dict:
-    sl_dist = atr_val * 1.5
-    tp_dist = sl_dist * 2.5
+    """
+    Расчёт TP/SL с тремя уровнями Take Profit
+    TP1: 15% от позиции
+    TP2: 40% от позиции  
+    TP3: 80% от позиции (максимальный тренд)
+    """
+    # Stop Loss = 2.0 × ATR от точки входа
+    sl_distance = atr_val * 2.0
+    
+    # Три уровня Take Profit
+    # TP1: быстрая фиксация (1.5x от SL)
+    tp1_distance = sl_distance * 1.5
+    
+    # TP2: основная цель (3.0x от SL)
+    tp2_distance = sl_distance * 3.0
+    
+    # TP3: максимум для сильного тренда (5.0x от SL)
+    tp3_distance = sl_distance * 5.0
     
     if side == "LONG":
-        sl, tp = entry - sl_dist, entry + tp_dist
-    else:
-        sl, tp = entry + sl_dist, entry - tp_dist
+        sl = entry - sl_distance
+        tp1 = entry + tp1_distance
+        tp2 = entry + tp2_distance
+        tp3 = entry + tp3_distance
+    else:  # SHORT
+        sl = entry + sl_distance
+        tp1 = entry - tp1_distance
+        tp2 = entry - tp2_distance
+        tp3 = entry - tp3_distance
     
     return {
         "stop_loss": sl,
-        "take_profit": tp,
+        "take_profit_1": tp1,
+        "take_profit_2": tp2,
+        "take_profit_3": tp3,
         "sl_percent": abs((sl - entry) / entry * 100),
-        "tp_percent": abs((tp - entry) / entry * 100)
+        "tp1_percent": abs((tp1 - entry) / entry * 100),
+        "tp2_percent": abs((tp2 - entry) / entry * 100),
+        "tp3_percent": abs((tp3 - entry) / entry * 100)
     }
 
 # ==================== STRATEGY ====================
-def analyze_signal(pair: str) -> Optional[Dict]:
-    """Упрощённая быстрая стратегия для масштабирования"""
+def quick_screen(pair: str) -> bool:
+    """Быстрый скрининг - отсев слабых кандидатов"""
     candles = CANDLES.get_candles(pair)
+    if len(candles) < 60:
+        return False
     
-    if len(candles) < 100:
+    closes = [c["c"] for c in candles]
+    ema9 = ema(closes, EMA_FAST)
+    ema21 = ema(closes, EMA_SLOW)
+    
+    if ema9 is None or ema21 is None:
+        return False
+    
+    # Должен быть явный тренд
+    return abs(ema9 - ema21) / ema21 > 0.002
+
+def analyze_signal(pair: str) -> Optional[Dict]:
+    """ГЛУБОКИЙ АНАЛИЗ - все индикаторы + дивергенции"""
+    
+    # Этап 1: Быстрый скрининг
+    if not quick_screen(pair):
+        return None
+    
+    # Этап 2: Полный анализ
+    candles = CANDLES.get_candles(pair)
+    if len(candles) < 250:
         return None
     
     closes = [c["c"] for c in candles]
     current_price = closes[-1]
     
+    # Все индикаторы
     ema9 = ema(closes, EMA_FAST)
     ema21 = ema(closes, EMA_SLOW)
     ema50 = ema(closes, EMA_TREND)
-    rsi_val = rsi(closes, RSI_PERIOD)
+    ema200 = ema(closes, EMA_LONG_TREND) if len(closes) >= 200 else None
+    
+    # Вычисляем RSI для последних 50 свечей для проверки дивергенций
+    rsi_history = []
+    for i in range(len(closes) - 50, len(closes)):
+        if i >= RSI_PERIOD:
+            rsi_val = rsi(closes[:i+1], RSI_PERIOD)
+            if rsi_val:
+                rsi_history.append(rsi_val)
+    
+    rsi_current = rsi(closes, RSI_PERIOD)
+    macd_data = macd(closes)
+    bb_data = bollinger_bands(closes)
+    vol_strength = volume_strength(candles, 20)
     atr_val = atr(candles, 14)
     
-    if None in [ema9, ema21, ema50, rsi_val, atr_val]:
+    if None in [ema9, ema21, ema50, rsi_current, macd_data, bb_data, vol_strength, atr_val]:
         return None
     
+    macd_line, signal_line, histogram = macd_data
+    bb_upper, bb_middle, bb_lower = bb_data
+    
+    # Проверка дивергенций
+    divergence = check_divergence(closes[-50:], rsi_history) if len(rsi_history) >= 20 else None
+    
+    # Система баллов (из 100)
     score = 0
     reasons = []
     side = None
     
-    # LONG
-    if ema9 > ema21 > ema50 and current_price > ema50:
-        score += 40
-        reasons.append("Сильный восходящий тренд")
+    # ========== LONG СИГНАЛ ==========
+    if ema9 > ema21 and ema21 > ema50:
+        # 1. Тренд (максимум 30 баллов)
+        score += 20
+        reasons.append("Восходящий тренд (EMA 9>21>50)")
         
-        if RSI_OVERSOLD < rsi_val < 60:
-            score += 30
-            reasons.append(f"RSI оптимален ({rsi_val:.1f})")
+        # Бонус если над EMA200 (долгосрочный тренд)
+        if ema200 and current_price > ema200:
+            score += 10
+            reasons.append("Цена выше EMA200 (бычий долгосрочный тренд)")
         
-        if (ema9 - ema21) / ema21 > 0.003:
-            score += 30
-            reasons.append("Сильный импульс вверх")
+        # 2. RSI (максимум 20 баллов)
+        if RSI_OVERSOLD < rsi_current < 65:
+            if 45 <= rsi_current <= 55:
+                score += 20
+                reasons.append(f"RSI идеален ({rsi_current:.1f})")
+            else:
+                score += 15
+                reasons.append(f"RSI приемлем ({rsi_current:.1f})")
+        
+        # 3. MACD (максимум 20 баллов)
+        if macd_line > signal_line:
+            score += 15
+            reasons.append("MACD бычий")
+            if histogram > 0 and abs(histogram) > abs(macd_line) * 0.1:
+                score += 5
+                reasons.append("MACD гистограмма растёт")
+        
+        # 4. Bollinger Bands (максимум 15 баллов)
+        bb_position = (current_price - bb_lower) / (bb_upper - bb_lower)
+        if bb_position < 0.3:
+            score += 15
+            reasons.append("Отскок от нижней BB (сильный)")
+        elif bb_position < 0.5:
+            score += 10
+            reasons.append("Отскок от нижней BB")
+        
+        # 5. Объём (максимум 10 баллов)
+        if vol_strength > 2.0:
+            score += 10
+            reasons.append(f"Очень высокий объём ({vol_strength:.1f}x)")
+        elif vol_strength > 1.5:
+            score += 7
+            reasons.append(f"Высокий объём ({vol_strength:.1f}x)")
+        
+        # 6. Сила импульса (максимум 10 баллов)
+        momentum = (ema9 - ema21) / ema21
+        if momentum > 0.01:  # 1%
+            score += 10
+            reasons.append("Очень сильный импульс")
+        elif momentum > 0.005:
+            score += 7
+            reasons.append("Сильный импульс")
+        
+        # 7. Дивергенция (бонус 15 баллов)
+        if divergence == "bullish":
+            score += 15
+            reasons.append("⚡ Бычья дивергенция!")
         
         if score >= MIN_SIGNAL_SCORE:
             side = "LONG"
     
-    # SHORT
-    elif ema9 < ema21 < ema50 and current_price < ema50:
-        score += 40
-        reasons.append("Сильный нисходящий тренд")
+    # ========== SHORT СИГНАЛ ==========
+    elif ema9 < ema21 and ema21 < ema50:
+        # 1. Тренд (максимум 30 баллов)
+        score += 20
+        reasons.append("Нисходящий тренд (EMA 9<21<50)")
         
-        if 40 < rsi_val < RSI_OVERBOUGHT:
-            score += 30
-            reasons.append(f"RSI оптимален ({rsi_val:.1f})")
+        # Бонус если под EMA200
+        if ema200 and current_price < ema200:
+            score += 10
+            reasons.append("Цена ниже EMA200 (медвежий долгосрочный тренд)")
         
-        if (ema21 - ema9) / ema21 > 0.003:
-            score += 30
-            reasons.append("Сильный импульс вниз")
+        # 2. RSI (максимум 20 баллов)
+        if 35 < rsi_current < RSI_OVERBOUGHT:
+            if 45 <= rsi_current <= 55:
+                score += 20
+                reasons.append(f"RSI идеален ({rsi_current:.1f})")
+            else:
+                score += 15
+                reasons.append(f"RSI приемлем ({rsi_current:.1f})")
+        
+        # 3. MACD (максимум 20 баллов)
+        if macd_line < signal_line:
+            score += 15
+            reasons.append("MACD медвежий")
+            if histogram < 0 and abs(histogram) > abs(macd_line) * 0.1:
+                score += 5
+                reasons.append("MACD гистограмма падает")
+        
+        # 4. Bollinger Bands (максимум 15 баллов)
+        bb_position = (current_price - bb_lower) / (bb_upper - bb_lower)
+        if bb_position > 0.7:
+            score += 15
+            reasons.append("Откат от верхней BB (сильный)")
+        elif bb_position > 0.5:
+            score += 10
+            reasons.append("Откат от верхней BB")
+        
+        # 5. Объём (максимум 10 баллов)
+        if vol_strength > 2.0:
+            score += 10
+            reasons.append(f"Очень высокий объём ({vol_strength:.1f}x)")
+        elif vol_strength > 1.5:
+            score += 7
+            reasons.append(f"Высокий объём ({vol_strength:.1f}x)")
+        
+        # 6. Сила импульса (максимум 10 баллов)
+        momentum = (ema21 - ema9) / ema21
+        if momentum > 0.01:
+            score += 10
+            reasons.append("Очень сильный импульс")
+        elif momentum > 0.005:
+            score += 7
+            reasons.append("Сильный импульс")
+        
+        # 7. Дивергенция (бонус 15 баллов)
+        if divergence == "bearish":
+            score += 15
+            reasons.append("⚡ Медвежья дивергенция!")
         
         if score >= MIN_SIGNAL_SCORE:
             side = "SHORT"
@@ -360,8 +618,62 @@ def analyze_signal(pair: str) -> Optional[Dict]:
 bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
 dp = Dispatcher(bot)
 
-USER_STATES: Dict[int, dict] = {}
-LAST_SIGNALS: Dict[Tuple[str, str], float] = {}
+# ==================== TRANSLATIONS ====================
+TEXTS = {
+    "ru": {
+        "welcome": "Выбери язык / Choose language",
+        "main_menu": "Главное меню",
+        "start_text": f"<b>🚀 {BOT_NAME}</b>\n\nТочные сигналы с автоматическим TP/SL\n\n• 3 сигнала в день (только сильные)\n• Мультистратегия (7 индикаторов)\n• 3 уровня Take Profit\n• Объяснение каждого входа\n\n📖 Жми Инструкция",
+        "btn_alerts": "📈 Алерты",
+        "btn_ref": "👥 Рефералка",
+        "btn_guide": "📖 Инструкция",
+        "btn_support": "💬 Поддержка",
+        "btn_unlock": "🔓 Открыть доступ",
+        "btn_admin": "👑 Админ",
+        "btn_back": "⬅️ Назад",
+        "access_required": "Оплатите доступ для использования алертов!",
+    },
+    "en": {
+        "welcome": "Выбери язык / Choose language",
+        "main_menu": "Main Menu",
+        "start_text": f"<b>🚀 {BOT_NAME}</b>\n\nAccurate signals with automatic TP/SL\n\n• 3 signals per day (only strong)\n• Multi-strategy (7 indicators)\n• 3 Take Profit levels\n• Explanation for each entry\n\n📖 Press Guide",
+        "btn_alerts": "📈 Alerts",
+        "btn_ref": "👥 Referrals",
+        "btn_guide": "📖 Guide",
+        "btn_support": "💬 Support",
+        "btn_unlock": "🔓 Unlock Access",
+        "btn_admin": "👑 Admin",
+        "btn_back": "⬅️ Back",
+        "access_required": "Please pay for access to use alerts!",
+    }
+}
+
+async def get_user_lang(uid: int) -> str:
+    """Получить язык пользователя"""
+    conn = await db_pool.acquire()
+    try:
+        cursor = await conn.execute("SELECT language FROM users WHERE id=?", (uid,))
+        row = await cursor.fetchone()
+        return row["language"] if row and row["language"] else "ru"
+    finally:
+        await db_pool.release(conn)
+
+async def set_user_lang(uid: int, lang: str):
+    """Установить язык пользователя"""
+    conn = await db_pool.acquire()
+    try:
+        await conn.execute("UPDATE users SET language=? WHERE id=?", (lang, uid))
+        await conn.commit()
+    finally:
+        await db_pool.release(conn)
+
+def t(uid_or_lang, key: str) -> str:
+    """Перевод текста"""
+    if isinstance(uid_or_lang, str):
+        lang = uid_or_lang
+    else:
+        lang = "ru"  # дефолт
+    return TEXTS.get(lang, TEXTS["ru"]).get(key, key)
 
 def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
@@ -437,33 +749,40 @@ async def send_message_safe(user_id: int, text: str, **kwargs):
         return False
 
 # ==================== KEYBOARDS ====================
-def main_menu_kb(is_admin_user: bool, is_paid_user: bool):
+def main_menu_kb(is_admin_user: bool, is_paid_user: bool, lang: str = "ru"):
     kb = InlineKeyboardMarkup(row_width=2)
     if is_paid_user:
         kb.add(
-            InlineKeyboardButton("📈 Алерты", callback_data="menu_alerts"),
-            InlineKeyboardButton("👥 Рефералка", callback_data="menu_ref")
+            InlineKeyboardButton(t(lang, "btn_alerts"), callback_data="menu_alerts"),
+            InlineKeyboardButton(t(lang, "btn_ref"), callback_data="menu_ref")
         )
     kb.add(
-        InlineKeyboardButton("📖 Инструкция", callback_data="menu_guide"),
-        InlineKeyboardButton("💬 Поддержка", url=SUPPORT_URL)
+        InlineKeyboardButton(t(lang, "btn_guide"), callback_data="menu_guide"),
+        InlineKeyboardButton(t(lang, "btn_support"), url=SUPPORT_URL)
     )
     if not is_paid_user:
-        kb.add(InlineKeyboardButton("🔓 Открыть доступ", callback_data="menu_pay"))
+        kb.add(InlineKeyboardButton(t(lang, "btn_unlock"), callback_data="menu_pay"))
     if is_admin_user:
-        kb.add(InlineKeyboardButton("👑 Админ", callback_data="menu_admin"))
+        kb.add(InlineKeyboardButton(t(lang, "btn_admin"), callback_data="menu_admin"))
+    kb.add(InlineKeyboardButton("🌐 Language", callback_data="change_lang"))
     return kb
 
-def alerts_kb(user_pairs: List[str]):
+def alerts_kb(user_pairs: List[str], lang: str = "ru"):
     kb = InlineKeyboardMarkup(row_width=2)
     for pair in DEFAULT_PAIRS:
         emoji = "✅" if pair in user_pairs else "➕"
         kb.add(InlineKeyboardButton(f"{emoji} {pair}", callback_data=f"toggle_{pair}"))
+    
+    add_btn = "➕ Своя монета" if lang == "ru" else "➕ Custom coin"
+    my_btn = "📋 Мои монеты" if lang == "ru" else "📋 My coins"
+    info_btn = "💡 Как это работает?" if lang == "ru" else "💡 How it works?"
+    
     kb.add(
-        InlineKeyboardButton("➕ Своя монета", callback_data="add_custom"),
-        InlineKeyboardButton("📋 Мои монеты", callback_data="my_pairs")
+        InlineKeyboardButton(add_btn, callback_data="add_custom"),
+        InlineKeyboardButton(my_btn, callback_data="my_pairs")
     )
-    kb.add(InlineKeyboardButton("⬅️ Назад", callback_data="back_main"))
+    kb.add(InlineKeyboardButton(info_btn, callback_data="alerts_info"))
+    kb.add(InlineKeyboardButton(t(lang, "btn_back"), callback_data="back_main"))
     return kb
 
 def ref_kb():
@@ -532,12 +851,103 @@ async def cmd_start(message: types.Message):
 
 @dp.callback_query_handler(lambda c: c.data == "back_main")
 async def back_main(call: types.CallbackQuery):
+    lang = await get_user_lang(call.from_user.id)
     paid = await is_paid(call.from_user.id)
-    text = f"<b>🚀 {BOT_NAME}</b>\n\nГлавное меню"
     try:
-        await call.message.edit_text(text, reply_markup=main_menu_kb(is_admin(call.from_user.id), paid))
+        await call.message.edit_text(t(lang, "main_menu"), 
+                                     reply_markup=main_menu_kb(is_admin(call.from_user.id), paid, lang))
     except:
         pass
+    await call.answer()
+
+# ==================== ALERTS INFO ====================
+@dp.callback_query_handler(lambda c: c.data == "alerts_info")
+async def alerts_info(call: types.CallbackQuery):
+    """Подробное объяснение как работают алерты"""
+    lang = await get_user_lang(call.from_user.id)
+    
+    if lang == "ru":
+        text = "💡 <b>Как работают алерты?</b>\n\n"
+        text += "<b>1. Выбери монеты</b>\n"
+        text += "Нажми на монету чтобы добавить её в отслеживание. Бот будет анализировать её каждые 5 минут.\n\n"
+        text += "<b>2. Бот анализирует рынок</b>\n"
+        text += "Используя 7 индикаторов:\n"
+        text += "• EMA (тренды)\n"
+        text += "• RSI (перекупленность)\n"
+        text += "• MACD (импульс)\n"
+        text += "• Bollinger Bands (уровни)\n"
+        text += "• Volume (объём)\n"
+        text += "• Дивергенции\n"
+        text += "• ATR (волатильность)\n\n"
+        text += "<b>3. Получаешь сигнал</b>\n"
+        text += "Только когда:\n"
+        text += "✅ Сила сигнала 85+ баллов\n"
+        text += "✅ Подтверждено 5+ индикаторами\n"
+        text += "✅ Не больше 3 сигналов в день\n\n"
+        text += "<b>4. Управление позицией</b>\n"
+        text += "📍 TP1 (15% позиции) - быстрая фиксация\n"
+        text += "   → Передвинь SL в безубыток!\n\n"
+        text += "📍 TP2 (40% позиции) - основная цель\n"
+        text += "   → Передвинь SL к TP1\n\n"
+        text += "📍 TP3 (80% позиции) - максимум тренда\n"
+        text += "   → Закрой всё оставшееся\n\n"
+        text += "<b>🎯 Почему 3 уровня?</b>\n"
+        text += "• Не жадничаешь - фиксируешь профит постепенно\n"
+        text += "• После TP1 ты УЖЕ в плюсе без риска\n"
+        text += "• Оставляешь позицию на тренд если пойдёт сильнее\n"
+        text += "• Психологически легче торговать\n\n"
+        text += "<b>💡 Рекомендации:</b>\n"
+        text += "• НЕ ИГНОРИРУЙ Stop Loss - это защита капитала\n"
+        text += "• После TP1 ОБЯЗАТЕЛЬНО передвинь SL в безубыток\n"
+        text += "• Не входи всем депозитом - макс 5% на сделку\n"
+        text += "• Веди дневник сделок - анализируй ошибки\n"
+        text += "• Торгуй по плану, не по эмоциям\n\n"
+        text += "⚠️ <b>Помни:</b> Даже лучшие сигналы не дают 100% гарантии. Управление рисками важнее точности входа!"
+    else:
+        text = "💡 <b>How Alerts Work?</b>\n\n"
+        text += "<b>1. Select Coins</b>\n"
+        text += "Click on a coin to add it to tracking. Bot will analyze it every 5 minutes.\n\n"
+        text += "<b>2. Bot Analyzes Market</b>\n"
+        text += "Using 7 indicators:\n"
+        text += "• EMA (trends)\n"
+        text += "• RSI (overbought/oversold)\n"
+        text += "• MACD (momentum)\n"
+        text += "• Bollinger Bands (levels)\n"
+        text += "• Volume\n"
+        text += "• Divergences\n"
+        text += "• ATR (volatility)\n\n"
+        text += "<b>3. Receive Signal</b>\n"
+        text += "Only when:\n"
+        text += "✅ Signal strength 85+ points\n"
+        text += "✅ Confirmed by 5+ indicators\n"
+        text += "✅ Max 3 signals per day\n\n"
+        text += "<b>4. Position Management</b>\n"
+        text += "📍 TP1 (15% position) - quick profit\n"
+        text += "   → Move SL to breakeven!\n\n"
+        text += "📍 TP2 (40% position) - main target\n"
+        text += "   → Move SL to TP1\n\n"
+        text += "📍 TP3 (80% position) - max trend\n"
+        text += "   → Close remaining\n\n"
+        text += "<b>🎯 Why 3 Levels?</b>\n"
+        text += "• Don't be greedy - take profit gradually\n"
+        text += "• After TP1 you're in profit with NO risk\n"
+        text += "• Leave position for trend if it goes stronger\n"
+        text += "• Psychologically easier to trade\n\n"
+        text += "<b>💡 Recommendations:</b>\n"
+        text += "• DON'T IGNORE Stop Loss - it protects capital\n"
+        text += "• After TP1 ALWAYS move SL to breakeven\n"
+        text += "• Don't use full deposit - max 5% per trade\n"
+        text += "• Keep trading journal - analyze mistakes\n"
+        text += "• Trade by plan, not by emotions\n\n"
+        text += "⚠️ <b>Remember:</b> Even best signals don't guarantee 100%. Risk management is more important than entry accuracy!"
+    
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(t(lang, "btn_back"), callback_data="menu_alerts"))
+    
+    try:
+        await call.message.edit_text(text, reply_markup=kb)
+    except:
+        await call.message.answer(text, reply_markup=kb)
     await call.answer()
 
 # ==================== PAYWALL ====================
@@ -585,13 +995,20 @@ async def handle_promo(message: types.Message):
 @dp.callback_query_handler(lambda c: c.data == "menu_alerts")
 async def menu_alerts(call: types.CallbackQuery):
     uid = call.from_user.id
+    lang = await get_user_lang(uid)
+    
     if not await is_paid(uid):
-        await call.answer("Оплатите доступ!", show_alert=True)
+        await call.answer(t(lang, "access_required"), show_alert=True)
         return
     
     pairs = await get_user_pairs(uid)
-    text = f"📈 <b>Алерты</b>\n\nВыбери монеты (до 10)\n\nАктивно: {len(pairs)}/10"
-    await call.message.edit_text(text, reply_markup=alerts_kb(pairs))
+    
+    if lang == "ru":
+        text = f"📈 <b>Управление алертами</b>\n\nВыбери монеты (до 10)\n\nАктивно: {len(pairs)}/10\n\n💡 Нажми «Как это работает?» для подробностей"
+    else:
+        text = f"📈 <b>Manage Alerts</b>\n\nSelect coins (up to 10)\n\nActive: {len(pairs)}/10\n\n💡 Press «How it works?» for details"
+    
+    await call.message.edit_text(text, reply_markup=alerts_kb(pairs, lang))
     await call.answer()
 
 @dp.callback_query_handler(lambda c: c.data.startswith("toggle_"))
@@ -787,12 +1204,32 @@ async def menu_guide(call: types.CallbackQuery):
     text += "<b>Шаг 3:</b> Получай сигналы\n\n"
     text += "<b>В каждом сигнале:</b>\n"
     text += "• Цена входа\n"
-    text += "• 🎯 Take Profit\n"
-    text += "• 🛡 Stop Loss\n"
-    text += "• Причины входа\n\n"
+    text += "• 🎯 TP1 (15% позиции)\n"
+    text += "• 🎯 TP2 (40% позиции)\n"
+    text += "• 🎯 TP3 (80% позиции)\n"
+    text += "• 🛡 Stop Loss (2.0 × ATR)\n"
+    text += "• Причины входа\n"
+    text += "• Сила сигнала (85-100 баллов)\n\n"
+    text += "<b>Стратегия управления:</b>\n"
+    text += "1. При достижении TP1:\n"
+    text += "   - Закрой 15% позиции\n"
+    text += "   - Передвинь SL в безубыток (точка входа)\n"
+    text += "2. При достижении TP2:\n"
+    text += "   - Закрой ещё 40% позиции\n"
+    text += "   - Передвинь SL к TP1\n"
+    text += "3. При достижении TP3:\n"
+    text += "   - Закрой оставшиеся 80%\n\n"
+    text += "<b>Анализ (7 индикаторов):</b>\n"
+    text += "• Таймфрейм: 5 минут\n"
+    text += "• EMA тренды (9/21/50/200)\n"
+    text += "• RSI + дивергенции\n"
+    text += "• MACD импульс\n"
+    text += "• Bollinger Bands\n"
+    text += "• Объём\n"
+    text += "• ATR волатильность\n\n"
     text += "<b>⚠️ Важно:</b>\n"
-    text += "• Используй стоп-лоссы\n"
-    text += "• Не вкладывай последние деньги\n"
+    text += "• Не жадничай - фиксируй по уровням\n"
+    text += "• После TP1 ты в плюсе без риска\n"
     text += "• Это не финансовый совет"
     
     kb = InlineKeyboardMarkup()
