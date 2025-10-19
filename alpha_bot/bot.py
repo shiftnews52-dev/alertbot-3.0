@@ -1198,8 +1198,6 @@ async def ref_guide(call: types.CallbackQuery):
 # ==================== GUIDE ====================
 @dp.callback_query_handler(lambda c: c.data == "menu_guide")
 async def menu_guide(call: types.CallbackQuery):
-@dp.callback_query_handler(lambda c: c.data == "menu_guide")
-async def menu_guide(call: types.CallbackQuery):
     lang = await get_user_lang(call.from_user.id)
     
     if lang == "ru":
@@ -1553,3 +1551,4 @@ async def on_startup():
 if __name__ == "__main__":
     asyncio.get_event_loop().run_until_complete(on_startup())
     executor.start_polling(dp, skip_updates=True)
+
