@@ -1198,43 +1198,97 @@ async def ref_guide(call: types.CallbackQuery):
 # ==================== GUIDE ====================
 @dp.callback_query_handler(lambda c: c.data == "menu_guide")
 async def menu_guide(call: types.CallbackQuery):
-    text = "📖 <b>Инструкция</b>\n\n"
-    text += "<b>Шаг 1:</b> Оплати доступ\n"
-    text += "<b>Шаг 2:</b> Выбери монеты (до 10)\n"
-    text += "<b>Шаг 3:</b> Получай сигналы\n\n"
-    text += "<b>В каждом сигнале:</b>\n"
-    text += "• Цена входа\n"
-    text += "• 🎯 TP1 (15% позиции)\n"
-    text += "• 🎯 TP2 (40% позиции)\n"
-    text += "• 🎯 TP3 (80% позиции)\n"
-    text += "• 🛡 Stop Loss (2.0 × ATR)\n"
-    text += "• Причины входа\n"
-    text += "• Сила сигнала (85-100 баллов)\n\n"
-    text += "<b>Стратегия управления:</b>\n"
-    text += "1. При достижении TP1:\n"
-    text += "   - Закрой 15% позиции\n"
-    text += "   - Передвинь SL в безубыток (точка входа)\n"
-    text += "2. При достижении TP2:\n"
-    text += "   - Закрой ещё 40% позиции\n"
-    text += "   - Передвинь SL к TP1\n"
-    text += "3. При достижении TP3:\n"
-    text += "   - Закрой оставшиеся 80%\n\n"
-    text += "<b>Анализ (7 индикаторов):</b>\n"
-    text += "• Таймфрейм: 5 минут\n"
-    text += "• EMA тренды (9/21/50/200)\n"
-    text += "• RSI + дивергенции\n"
-    text += "• MACD импульс\n"
-    text += "• Bollinger Bands\n"
-    text += "• Объём\n"
-    text += "• ATR волатильность\n\n"
-    text += "<b>⚠️ Важно:</b>\n"
-    text += "• Не жадничай - фиксируй по уровням\n"
-    text += "• После TP1 ты в плюсе без риска\n"
-    text += "• Это не финансовый совет"
+@dp.callback_query_handler(lambda c: c.data == "menu_guide")
+async def menu_guide(call: types.CallbackQuery):
+    lang = await get_user_lang(call.from_user.id)
+    
+    if lang == "ru":
+        text = "📖 <b>Инструкция</b>\n\n"
+        text += "<b>Шаг 1:</b> Оплати доступ\n"
+        text += "<b>Шаг 2:</b> Выбери монеты (до 10)\n"
+        text += "<b>Шаг 3:</b> Получай сигналы\n\n"
+        text += "<b>В каждом сигнале:</b>\n"
+        text += "• Цена входа\n"
+        text += "• 🎯 TP1 (15% позиции)\n"
+        text += "• 🎯 TP2 (40% позиции)\n"
+        text += "• 🎯 TP3 (80% позиции)\n"
+        text += "• 🛡 Stop Loss (2.0 × ATR)\n"
+        text += "• Причины входа\n"
+        text += "• Сила сигнала (85-100 баллов)\n\n"
+        text += "<b>Стратегия управления:</b>\n"
+        text += "1. При достижении TP1:\n"
+        text += "   - Закрой 15% позиции\n"
+        text += "   - Передвинь SL в безубыток (точка входа)\n"
+        text += "2. При достижении TP2:\n"
+        text += "   - Закрой ещё 40% позиции\n"
+        text += "   - Передвинь SL к TP1\n"
+        text += "3. При достижении TP3:\n"
+        text += "   - Закрой оставшиеся 80%\n\n"
+        text += "<b>Анализ (7 индикаторов):</b>\n"
+        text += "• Таймфрейм: 5 минут\n"
+        text += "• EMA тренды (9/21/50/200)\n"
+        text += "• RSI + дивергенции\n"
+        text += "• MACD импульс\n"
+        text += "• Bollinger Bands\n"
+        text += "• Объём\n"
+        text += "• ATR волатильность\n\n"
+        text += "<b>⚠️ Важно:</b>\n"
+        text += "• Не жадничай - фиксируй по уровням\n"
+        text += "• После TP1 ты в плюсе без риска\n"
+        text += "• Это не финансовый совет"
+    else:
+        text = "📖 <b>Guide</b>\n\n"
+        text += "<b>Step 1:</b> Pay for access\n"
+        text += "<b>Step 2:</b> Select coins (up to 10)\n"
+        text += "<b>Step 3:</b> Receive signals\n\n"
+        text += "<b>Each signal includes:</b>\n"
+        text += "• Entry price\n"
+        text += "• 🎯 TP1 (15% position)\n"
+        text += "• 🎯 TP2 (40% position)\n"
+        text += "• 🎯 TP3 (80% position)\n"
+        text += "• 🛡 Stop Loss (2.0 × ATR)\n"
+        text += "• Entry reasons\n"
+        text += "• Signal strength (85-100 points)\n\n"
+        text += "<b>Management strategy:</b>\n"
+        text += "1. When TP1 reached:\n"
+        text += "   - Close 15% of position\n"
+        text += "   - Move SL to breakeven (entry)\n"
+        text += "2. When TP2 reached:\n"
+        text += "   - Close 40% more\n"
+        text += "   - Move SL to TP1\n"
+        text += "3. When TP3 reached:\n"
+        text += "   - Close remaining 80%\n\n"
+        text += "<b>Analysis (7 indicators):</b>\n"
+        text += "• Timeframe: 5 minutes\n"
+        text += "• EMA trends (9/21/50/200)\n"
+        text += "• RSI + divergences\n"
+        text += "• MACD momentum\n"
+        text += "• Bollinger Bands\n"
+        text += "• Volume\n"
+        text += "• ATR volatility\n\n"
+        text += "<b>⚠️ Important:</b>\n"
+        text += "• Don't be greedy - take profit by levels\n"
+        text += "• After TP1 you're in profit with no risk\n"
+        text += "• This is not financial advice"
     
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("⬅️ Назад", callback_data="back_main"))
-    await call.message.edit_text(text, reply_markup=kb)
+    kb.add(InlineKeyboardButton(t(lang, "btn_back"), callback_data="back_main"))
+    
+    # Отправляем с картинкой если есть
+    if IMG_GUIDE:
+        try:
+            await call.message.delete()
+            await bot.send_photo(call.from_user.id, IMG_GUIDE, caption=text, reply_markup=kb)
+            await call.answer()
+            return
+        except:
+            pass
+    
+    try:
+        await call.message.edit_text(text, reply_markup=kb)
+    except:
+        await call.message.answer(text, reply_markup=kb)
+    
     await call.answer()
 
 # ==================== ADMIN ====================
